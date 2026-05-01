@@ -1,0 +1,80 @@
+name: arXiv-trends
+
+on:
+  schedule:
+    - cron: "0 14 * * 0"
+  workflow_dispatch:
+    inputs:
+      report_date:
+        description: "Report-ending date (YYYY-MM-DD). Leave empty for today."
+        required: false
+        default: ""
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main (code)
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          uv sync
+
+      - name: Fetch data branch into ./data
+        run: |
+          git fetch origin data --depth=1
+          git checkout origin/data -- data assets || true
+
+      - name: Generate trends report
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          LANGUAGE: ${{ vars.LANGUAGE }}
+          MODEL_NAME: ${{ vars.MODEL_NAME }}
+          REPORT_DATE_INPUT: ${{ github.event.inputs.report_date }}
+        run: |
+          source .venv/bin/activate
+          cd ai
+          if [ -n "$REPORT_DATE_INPUT" ] && echo "$REPORT_DATE_INPUT" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'; then
+            python trends.py --report-date "$REPORT_DATE_INPUT"
+          else
+            python trends.py
+          fi
+
+      - name: Stage trend files
+        run: |
+          mkdir -p /tmp/trend_files
+          cp -r data/trends /tmp/trend_files/ 2>/dev/null || true
+
+      - name: Commit trends to data branch
+        env:
+          GIT_EMAIL: ${{ vars.EMAIL }}
+          GIT_NAME: ${{ vars.NAME }}
+        run: |
+          git config --global user.email "$GIT_EMAIL"
+          git config --global user.name "$GIT_NAME"
+          rm -rf data assets
+          mkdir -p data
+          if git ls-remote --heads origin data | grep -q data; then
+            git fetch origin data:data
+            git checkout data
+            git pull origin data || true
+          else
+            echo "data branch missing"
+            exit 1
+          fi
+          mkdir -p data/trends
+          cp -r /tmp/trend_files/trends/* data/trends/ 2>/dev/null || true
+          git add data/trends
+          if git diff --staged --quiet; then
+            echo "no changes"
+          else
+            git commit -m "trends: report $(date -u +%Y-%m-%d)"
+            for i in 1 2 3; do
+              if git push origin data; then break; fi
+              git pull origin data --no-edit || true
+              if [ $i -eq 3 ]; then exit 1; fi
+            done
+          fi

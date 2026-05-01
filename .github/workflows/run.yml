@@ -119,6 +119,24 @@ jobs:
         fi
         echo "AI增强处理完成 / AI enhancement processing completed"
         
+    - name: Embed papers
+      if: steps.dedup_check.outputs.has_new_content == 'true'
+      continue-on-error: true
+      env:
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+        LANGUAGE: ${{ vars.LANGUAGE }}
+      run: |
+        source .venv/bin/activate
+        today=${{ steps.crawl_step.outputs.crawl_date }}
+        AI_FILE="../data/${today}_AI_enhanced_${LANGUAGE}.jsonl"
+        cd ai
+        if [ -f "$AI_FILE" ]; then
+          python embed.py --data "$AI_FILE" --out-dir ../data/embeddings
+        else
+          echo "no AI-enhanced file to embed; skipping"
+        fi
+
     - name: Convert to Markdown
       if: steps.dedup_check.outputs.has_new_content == 'true'
       run: |
@@ -291,6 +309,8 @@ jobs:
         
         # 复制数据文件到临时目录 / Copy data files to temporary directory
         cp -r data/* /tmp/data_files/data/ 2>/dev/null || true
+        # Ensure embeddings subdir is captured even if it's a fresh dir
+        if [ -d data/embeddings ]; then cp -r data/embeddings /tmp/data_files/data/ 2>/dev/null || true; fi
         cp assets/file-list.txt /tmp/data_files/assets/ 2>/dev/null || true
         
         echo "数据文件已保存到临时目录 / Data files saved to temporary directory"
