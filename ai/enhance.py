@@ -173,7 +173,14 @@ def process_all_items(data: List[Dict], model_name: str, language: str, max_work
     items, not anything already written.
     """
     llm = ChatOpenAI(model=model_name).with_structured_output(Structure, method="function_calling")
-    print('Connect to:', model_name, file=sys.stderr)
+    # Log resolved config (not the key value) so we can debug from CI logs without leaking secrets.
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    base_url = os.environ.get("OPENAI_BASE_URL", "(default api.openai.com/v1)")
+    key_preview = f"{api_key[:7]}…{api_key[-4:]}" if len(api_key) > 12 else "(missing or too short)"
+    print(f"Connect to: {model_name}", file=sys.stderr)
+    print(f"  base_url: {base_url}", file=sys.stderr)
+    print(f"  api_key:  {key_preview} (len={len(api_key)})", file=sys.stderr)
+    print(f"  workers:  {max_workers}", file=sys.stderr)
 
     prompt_template = ChatPromptTemplate.from_messages([
         SystemMessagePromptTemplate.from_template(system),

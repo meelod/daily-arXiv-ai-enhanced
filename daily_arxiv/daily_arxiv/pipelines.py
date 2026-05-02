@@ -15,7 +15,11 @@ from datetime import datetime, timedelta
 class DailyArxivPipeline:
     def __init__(self):
         self.page_size = 100
-        self.client = arxiv.Client(page_size=self.page_size, delay_seconds=1.0, num_retries=3)
+        # arXiv's API guideline is ~1 request per 3 seconds and they enforce it
+        # via 429s on shared IPs (e.g. GitHub Actions). 3.0 avoids retries entirely;
+        # 2.0 risks occasional 429s but is faster on average. Keep 3.0 unless you
+        # see clean runs with no 429 retries in the logs.
+        self.client = arxiv.Client(page_size=self.page_size, delay_seconds=3.0, num_retries=3)
 
     def process_item(self, item: dict, spider):
         item["pdf"] = f"https://arxiv.org/pdf/{item['id']}"
