@@ -60,14 +60,17 @@ jobs:
         
     - name: Check for duplicates
       id: dedup_check
+      env:
+        CRAWL_DATE: ${{ steps.crawl_step.outputs.crawl_date }}
       run: |
         source .venv/bin/activate
         echo "执行去重检查... / Performing intelligent deduplication check..."
-        
+        echo "Using crawl date: $CRAWL_DATE"
+
         cd daily_arxiv
         # 执行去重检查脚本 / Execute intelligent deduplication check script
         set +e  # 暂时允许命令失败 / Temporarily allow command failure
-        python daily_arxiv/check_stats.py
+        python daily_arxiv/check_stats.py "$CRAWL_DATE"
         
         # 获取退出码 / Get exit code
         dedup_exit_code=$?

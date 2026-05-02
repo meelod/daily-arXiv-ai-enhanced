@@ -11,7 +11,7 @@
 import json
 import sys
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 def load_papers_data(file_path):
     """
@@ -73,10 +73,19 @@ def perform_deduplication():
              - "error": 处理错误 / Processing error
     """
 
-    today = datetime.now().strftime("%Y-%m-%d")
+    # Date precedence: CLI arg > CRAWL_DATE env var > UTC today.
+    # This avoids a UTC-midnight race when the crawl step took long enough
+    # to roll over the date between steps.
+    if len(sys.argv) > 1 and sys.argv[1].strip():
+        today = sys.argv[1].strip()
+    elif os.environ.get("CRAWL_DATE"):
+        today = os.environ["CRAWL_DATE"].strip()
+    else:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     today_file = f"../data/{today}.jsonl"
     history_days = 7  # 向前追溯几天的数据进行对比
 
+    print(f"Checking today's file: {today_file}", file=sys.stderr)
     if not os.path.exists(today_file):
         print("今日数据文件不存在 / Today's data file does not exist", file=sys.stderr)
         return "no_data"
@@ -88,10 +97,14 @@ def perform_deduplication():
         if not today_papers:
             return "no_data"
 
-        # 收集历史多日 ID 集合
+        # 收集历史多日 ID 集合 — anchor history off the crawl date, not "now"
+        try:
+            today_dt = datetime.strptime(today, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            today_dt = datetime.now(timezone.utc)
         history_ids = set()
         for i in range(1, history_days + 1):
-            date_str = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
+            date_str = (today_dt - timedelta(days=i)).strftime("%Y-%m-%d")
             history_file = f"../data/{date_str}.jsonl"
             _, past_ids = load_papers_data(history_file)
             history_ids.update(past_ids)
