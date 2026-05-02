@@ -21,42 +21,46 @@ jobs:
         curl -LsSf https://astral.sh/uv/install.sh | sh
         uv sync
         
+    - name: Compute crawl date
+      id: date_step
+      run: echo "today=$(date -u +%Y-%m-%d)" >> $GITHUB_OUTPUT
+
+    - name: Restore data cache (resume support)
+      uses: actions/cache/restore@v4
+      with:
+        path: data
+        key: pipeline-data-${{ steps.date_step.outputs.today }}-final
+        restore-keys: |
+          pipeline-data-${{ steps.date_step.outputs.today }}-
+
     - name: Crawl arXiv papers
       id: crawl_step
+      env:
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+        TOKEN_GITHUB: ${{ secrets.TOKEN_GITHUB }}
+        LANGUAGE: ${{ vars.LANGUAGE }}
+        CATEGORIES: ${{ vars.CATEGORIES }}
+        MODEL_NAME: ${{ vars.MODEL_NAME }}
+        CRAWL_DATE: ${{ steps.date_step.outputs.today }}
       run: |
         source .venv/bin/activate
-        today=$(date -u "+%Y-%m-%d")
-        echo "开始爬取 $today 的arXiv论文... / Starting to crawl $today arXiv papers..."
-        
-        # 检查今日文件是否已存在，如存在则删除 / Check if today's file exists, delete if found
-        if [ -f "data/${today}.jsonl" ]; then
-            echo "🗑️ 发现今日文件已存在，正在删除重新生成... / Found existing today's file, deleting for fresh start..."
-            rm "data/${today}.jsonl"
-            echo "✅ 已删除现有文件：data/${today}.jsonl / Deleted existing file: data/${today}.jsonl"
-        else
-            echo "📝 今日文件不存在，准备新建... / Today's file doesn't exist, ready to create new one..."
-        fi
-        
+        today="${CRAWL_DATE}"
+        echo "Starting crawl for $today (resumes if data/${today}.jsonl exists from prior run)"
         cd daily_arxiv
-        export OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
-        export OPENAI_BASE_URL=${{ secrets.OPENAI_BASE_URL }}
-        export TOKEN_GITHUB=${{ secrets.TOKEN_GITHUB }}
-        export LANGUAGE="${{ vars.LANGUAGE }}"
-        export CATEGORIES="${{ vars.CATEGORIES }}"
-        export MODEL_NAME="${{ vars.MODEL_NAME }}"
         
-        # 使用Scrapy爬取
-        # Use Scrapy to crawl
+        # Scrapy `-o` appends to the file (resume-friendly). The spider also
+        # skips IDs already present in this file, so re-running after a crash
+        # only fetches metadata for what's missing.
         scrapy crawl arxiv -o ../data/${today}.jsonl
-        
-        # 检查爬取是否成功 / Check if crawling was successful
+
         if [ ! -f "../data/${today}.jsonl" ]; then
-            echo "爬取失败，未生成数据文件 / Crawling failed, no data file generated"
+            echo "Crawling failed, no data file generated"
             exit 1
         fi
-        
+
         echo "crawl_date=$today" >> $GITHUB_OUTPUT
-        echo "爬取完成 / Crawling completed"
+        echo "Crawling completed (file size: $(wc -l < ../data/${today}.jsonl) lines)"
         
     - name: Check for duplicates
       id: dedup_check
@@ -371,6 +375,13 @@ jobs:
           git commit -m "update: $today arXiv papers"
           echo "数据变更已提交到 data 分支 / Data changes committed to data branch"
         fi
+
+    - name: Save data cache (resume checkpoint)
+      if: always()
+      uses: actions/cache/save@v4
+      with:
+        path: data
+        key: pipeline-data-${{ steps.date_step.outputs.today }}-${{ github.run_id }}-${{ github.run_attempt }}
 
     - name: Push data changes to data branch
       if: steps.dedup_check.outputs.has_new_content == 'true'

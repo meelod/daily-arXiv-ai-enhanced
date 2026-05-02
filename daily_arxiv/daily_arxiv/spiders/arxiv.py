@@ -1,6 +1,8 @@
 import scrapy
 import os
 import re
+import json
+from datetime import datetime, timezone
 
 
 class ArxivSpider(scrapy.Spider):
@@ -8,14 +10,36 @@ class ArxivSpider(scrapy.Spider):
         super().__init__(*args, **kwargs)
         categories = os.environ.get("CATEGORIES", "cs.CV")
         categories = categories.split(",")
-        # 保存目标分类列表，用于后续验证
         self.target_categories = set(map(str.strip, categories))
         self.start_urls = [
             f"https://arxiv.org/list/{cat}/new" for cat in self.target_categories
-        ]  # 起始URL（计算机科学领域的最新论文）
+        ]
 
-    name = "arxiv"  # 爬虫名称
-    allowed_domains = ["arxiv.org"]  # 允许爬取的域名
+        # Resume support: skip IDs already present in today's output file from a prior crash.
+        crawl_date = os.environ.get("CRAWL_DATE", "").strip() or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        existing_path = os.path.join("..", "data", f"{crawl_date}.jsonl")
+        self.done_ids = set()
+        if os.path.exists(existing_path):
+            try:
+                with open(existing_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            rec = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if rec.get("id"):
+                            self.done_ids.add(rec["id"])
+            except Exception as e:
+                # Non-fatal — just means we won't resume
+                pass
+            if self.done_ids:
+                self.logger.info(f"Resume: skipping {len(self.done_ids)} IDs already in {existing_path}")
+
+    name = "arxiv"
+    allowed_domains = ["arxiv.org"]
 
     def parse(self, response):
         # 提取每篇论文的信息
@@ -61,6 +85,9 @@ class ArxivSpider(scrapy.Spider):
                 # 检查论文分类是否与目标分类有交集
                 paper_categories = set(categories_in_paper)
                 if paper_categories.intersection(self.target_categories):
+                    if arxiv_id in self.done_ids:
+                        self.logger.debug(f"Skipping already-fetched paper {arxiv_id}")
+                        continue
                     yield {
                         "id": arxiv_id,
                         "categories": list(paper_categories),  # 添加分类信息用于调试
@@ -70,6 +97,9 @@ class ArxivSpider(scrapy.Spider):
                     self.logger.debug(f"Skipped paper {arxiv_id} with categories {paper_categories} (not in target {self.target_categories})")
             else:
                 # 如果无法获取分类信息，记录警告但仍然返回论文（保持向后兼容）
+                if arxiv_id in self.done_ids:
+                    self.logger.debug(f"Skipping already-fetched paper {arxiv_id}")
+                    continue
                 self.logger.warning(f"Could not extract categories for paper {arxiv_id}, including anyway")
                 yield {
                     "id": arxiv_id,

@@ -165,92 +165,112 @@ def process_single_item(chain, item: Dict, language: str) -> Dict:
             return None
     return item
 
-def process_all_items(data: List[Dict], model_name: str, language: str, max_workers: int) -> List[Dict]:
-    """并行处理所有数据项"""
+def process_all_items(data: List[Dict], model_name: str, language: str, max_workers: int, target_file: str) -> int:
+    """Parallel-process all items, writing each result to target_file as it completes.
+
+    Workers run API calls concurrently. The single main thread serializes writes
+    to the output file (with flush) so a crash mid-run loses only the in-flight
+    items, not anything already written.
+    """
     llm = ChatOpenAI(model=model_name).with_structured_output(Structure, method="function_calling")
     print('Connect to:', model_name, file=sys.stderr)
-    
+
     prompt_template = ChatPromptTemplate.from_messages([
         SystemMessagePromptTemplate.from_template(system),
         HumanMessagePromptTemplate.from_template(template=template)
     ])
-
     chain = prompt_template | llm
-    
-    # 使用线程池并行处理
-    processed_data = [None] * len(data)  # 预分配结果列表
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # 提交所有任务
+
+    written = 0
+    with open(target_file, "a") as out, ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_idx = {
             executor.submit(process_single_item, chain, item, language): idx
             for idx, item in enumerate(data)
         }
-        
-        # 使用tqdm显示进度
-        for future in tqdm(
-            as_completed(future_to_idx),
-            total=len(data),
-            desc="Processing items"
-        ):
+        for future in tqdm(as_completed(future_to_idx), total=len(data), desc="Processing items"):
             idx = future_to_idx[future]
             try:
                 result = future.result()
-                processed_data[idx] = result
             except Exception as e:
                 print(f"Item at index {idx} generated an exception: {e}", file=sys.stderr)
-                # Add default AI fields to ensure consistency
-                processed_data[idx] = data[idx]
-                processed_data[idx]['AI'] = {
-                    "tldr": "Processing failed",
-                    "motivation": "Processing failed",
-                    "method": "Processing failed",
-                    "result": "Processing failed",
-                    "conclusion": "Processing failed"
+                result = {
+                    **data[idx],
+                    "AI": {
+                        "tldr": "Processing failed",
+                        "motivation": "Processing failed",
+                        "method": "Processing failed",
+                        "result": "Processing failed",
+                        "conclusion": "Processing failed",
+                    },
                 }
-    
-    return processed_data
+            if result is None:
+                continue
+            out.write(json.dumps(result) + "\n")
+            out.flush()
+            written += 1
+    return written
 
 def main():
     args = parse_args()
     model_name = os.environ.get("MODEL_NAME", 'gpt-4o-mini')
     language = os.environ.get("LANGUAGE", 'Chinese')
 
-    # 检查并删除目标文件
     target_file = args.data.replace('.jsonl', f'_AI_enhanced_{language}.jsonl')
+
+    # Resume support: read any existing output, collect already-done IDs, append-only writes.
+    done_ids = set()
     if os.path.exists(target_file):
-        os.remove(target_file)
-        print(f'Removed existing file: {target_file}', file=sys.stderr)
+        with open(target_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    # truncated final line from a prior crash — skip silently
+                    continue
+                pid = rec.get("id")
+                if pid:
+                    done_ids.add(pid)
+        if done_ids:
+            print(f"Resume: found {len(done_ids)} already-enhanced papers in {target_file}", file=sys.stderr)
 
     # 读取数据
     data = []
     with open(args.data, "r") as f:
         for line in f:
-            data.append(json.loads(line))
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
 
-    # 去重
+    # 去重 + skip already-enhanced
     seen_ids = set()
     unique_data = []
+    skipped_done = 0
     for item in data:
-        if item['id'] not in seen_ids:
-            seen_ids.add(item['id'])
-            unique_data.append(item)
+        pid = item.get('id')
+        if not pid or pid in seen_ids:
+            continue
+        seen_ids.add(pid)
+        if pid in done_ids:
+            skipped_done += 1
+            continue
+        unique_data.append(item)
 
-    data = unique_data
     print('Open:', args.data, file=sys.stderr)
-    
-    # 并行处理所有数据
-    processed_data = process_all_items(
-        data,
-        model_name,
-        language,
-        args.max_workers
-    )
-    
-    # 保存结果
-    with open(target_file, "w") as f:
-        for item in processed_data:
-            if item is not None:
-                f.write(json.dumps(item) + "\n")
+    print(f"Input: {len(data)} lines, {len(seen_ids)} unique, {skipped_done} already done, {len(unique_data)} to process", file=sys.stderr)
+
+    if not unique_data:
+        print("Nothing to do — output file already covers all input.", file=sys.stderr)
+        return
+
+    written = process_all_items(unique_data, model_name, language, args.max_workers, target_file)
+    print(f"Wrote {written} new records to {target_file}", file=sys.stderr)
 
 if __name__ == "__main__":
     main()
