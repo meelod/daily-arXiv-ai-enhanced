@@ -976,12 +976,18 @@ function renderCategoryFilter(categories) {
     const count = categoryCounts[category];
     const button = document.createElement('button');
     button.className = `category-button ${category === currentCategory ? 'active' : ''}`;
-    button.innerHTML = `${category}<span class="category-count">${count}</span>`;
+    const label = (typeof formatCategory === 'function') ? formatCategory(category) : category;
+    button.appendChild(document.createTextNode(label));
+    const countSpan = document.createElement('span');
+    countSpan.className = 'category-count';
+    countSpan.textContent = count;
+    button.appendChild(countSpan);
+    button.title = (typeof formatCategoryWithCode === 'function') ? formatCategoryWithCode(category) : category;
     button.dataset.category = category;
     button.addEventListener('click', () => {
       filterByCategory(category);
     });
-    
+
     container.appendChild(button);
   });
   
