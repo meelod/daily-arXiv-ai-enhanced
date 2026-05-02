@@ -90,7 +90,7 @@ function renderFilterTags() {
       tagElement.className = `category-button author-button ${activeAuthors.includes(author) ? 'active' : ''}`;
       tagElement.textContent = author;
       tagElement.dataset.author = author;
-      tagElement.title = "匹配作者姓名";
+      tagElement.title = "Match author name";
       
       tagElement.addEventListener('click', () => {
         toggleAuthorFilter(author);
@@ -115,7 +115,7 @@ function renderFilterTags() {
       tagElement.className = `category-button keyword-button ${activeKeywords.includes(keyword) ? 'active' : ''}`;
       tagElement.textContent = keyword;
       tagElement.dataset.keyword = keyword;
-      tagElement.title = "匹配标题和摘要中的关键词";
+      tagElement.title = "Match keywords in title and abstract";
       
       tagElement.addEventListener('click', () => {
         toggleKeywordFilter(keyword);
