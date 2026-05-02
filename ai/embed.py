@@ -45,6 +45,9 @@ def date_from_filename(path: str) -> str:
 
 def main():
     args = parse_args()
+    # Defensive: empty OPENAI_BASE_URL (unset secret → "") breaks the SDK.
+    if not os.environ.get("OPENAI_BASE_URL", "").strip():
+        os.environ.pop("OPENAI_BASE_URL", None)
     if not os.path.exists(args.data):
         print(f"input file not found: {args.data}", file=sys.stderr)
         sys.exit(0)

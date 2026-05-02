@@ -336,6 +336,12 @@ def match_clusters_to_previous(
 
 def main():
     args = parse_args()
+
+    # Defensive: empty OPENAI_BASE_URL (e.g. unset GitHub secret interpolated
+    # as "") makes every API call fail with "Connection error". Clear it.
+    if not os.environ.get("OPENAI_BASE_URL", "").strip():
+        os.environ.pop("OPENAI_BASE_URL", None)
+
     model_name = os.environ.get("TRENDS_MODEL_NAME") or os.environ.get("MODEL_NAME", "gpt-4o-mini")
     language = os.environ.get("LANGUAGE", "English")
 
