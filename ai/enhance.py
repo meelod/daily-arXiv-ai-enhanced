@@ -215,11 +215,29 @@ def main():
     model_name = os.environ.get("MODEL_NAME", 'gpt-4o-mini')
     language = os.environ.get("LANGUAGE", 'Chinese')
 
+    # Defensive: an empty OPENAI_BASE_URL env var (e.g. an undefined GitHub
+    # secret being interpolated as "") makes the openai SDK try to connect
+    # to "" and every call fails with "Connection error". Clear it.
+    if not os.environ.get("OPENAI_BASE_URL", "").strip():
+        os.environ.pop("OPENAI_BASE_URL", None)
+
     target_file = args.data.replace('.jsonl', f'_AI_enhanced_{language}.jsonl')
 
-    # Resume support: read any existing output, collect already-done IDs, append-only writes.
+    # Resume support: read existing output, drop any failure records (so they
+    # get retried), keep only good records, rewrite the file with only the
+    # good ones, then continue in append mode.
+    FAILURE_MARKERS = ("Processing failed", "Summary generation failed",
+                       "Motivation analysis unavailable", "Connection error")
+
+    def _is_failure(rec: dict) -> bool:
+        ai = rec.get("AI") or {}
+        tldr = (ai.get("tldr") or "").strip()
+        return any(m in tldr for m in FAILURE_MARKERS)
+
     done_ids = set()
     if os.path.exists(target_file):
+        good_records = []
+        dropped_failures = 0
         with open(target_file, "r") as f:
             for line in f:
                 line = line.strip()
@@ -231,10 +249,22 @@ def main():
                     # truncated final line from a prior crash — skip silently
                     continue
                 pid = rec.get("id")
-                if pid:
-                    done_ids.add(pid)
+                if not pid:
+                    continue
+                if _is_failure(rec):
+                    dropped_failures += 1
+                    continue
+                good_records.append(rec)
+                done_ids.add(pid)
+
+        if dropped_failures > 0:
+            # Rewrite without the failure records so retry doesn't duplicate.
+            with open(target_file, "w") as f:
+                for rec in good_records:
+                    f.write(json.dumps(rec) + "\n")
+            print(f"Resume: dropped {dropped_failures} prior-failure records — they'll be retried", file=sys.stderr)
         if done_ids:
-            print(f"Resume: found {len(done_ids)} already-enhanced papers in {target_file}", file=sys.stderr)
+            print(f"Resume: found {len(done_ids)} successfully-enhanced papers in {target_file}", file=sys.stderr)
 
     # 读取数据
     data = []
