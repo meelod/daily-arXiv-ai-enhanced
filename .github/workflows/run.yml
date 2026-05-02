@@ -211,39 +211,30 @@ jobs:
 
     - name: Generate password hash and inject into config
       if: steps.dedup_check.outputs.has_new_content == 'true'
+      env:
+        ACCESS_PASSWORD: ${{ secrets.ACCESS_PASSWORD }}
       run: |
-        echo "🔐 Generating password hash for authentication..."
-
-        PASSWORD="${{ secrets.ACCESS_PASSWORD }}"
-
-        if [ -z "$PASSWORD" ]; then
-          echo "⚠️  WARNING: ACCESS_PASSWORD not set in Secrets"
-          echo "⚠️  Password protection will be DISABLED"
-          echo "⚠️  To enable password protection, add ACCESS_PASSWORD in repository Secrets"
-          echo "ℹ️  Website will remain publicly accessible without authentication"
-
-          # Use a special value that will disable authentication
-          PASSWORD_HASH="DISABLED_NO_PASSWORD_SET_IN_SECRETS"
-        else
-          # Generate SHA-256 hash using openssl
-          PASSWORD_HASH=$(echo -n "$PASSWORD" | openssl dgst -sha256 -hex | awk '{print $2}')
-          echo "✅ Password hash generated successfully"
-          echo "✅ Hash length: ${#PASSWORD_HASH} characters"
-          echo "🔐 Password protection is ENABLED"
+        # If ACCESS_PASSWORD secret is unset, leave js/auth-config.js untouched.
+        # This way a hash that was set locally via set-password.sh is preserved
+        # and the workflow doesn't accidentally disable an existing gate.
+        if [ -z "$ACCESS_PASSWORD" ]; then
+          echo "ACCESS_PASSWORD secret not set — leaving js/auth-config.js untouched."
+          echo "(If you set the password via local set-password.sh, that hash stays in effect.)"
+          exit 0
         fi
 
-        # Inject hash into auth-config.js
-        if [ -f "js/auth-config.js" ]; then
-          # Replace the passwordHash field's value regardless of current contents
-          # (placeholder, prior hash, or DISABLED sentinel — all get overwritten).
-          sed -i -E "s|passwordHash: '[^']*'|passwordHash: '$PASSWORD_HASH'|" js/auth-config.js
-          echo "✅ Password hash injected into js/auth-config.js"
-        else
-          echo "❌ ERROR: js/auth-config.js not found!"
+        if [ ! -f "js/auth-config.js" ]; then
+          echo "ERROR: js/auth-config.js not found!" >&2
           exit 1
         fi
 
-        echo "🔐 Authentication setup complete"
+        # awk '{print $NF}' picks last field — works on Linux runner regardless of openssl version.
+        PASSWORD_HASH=$(printf '%s' "$ACCESS_PASSWORD" | openssl dgst -sha256 -hex | awk '{print $NF}')
+        echo "Password hash generated (len ${#PASSWORD_HASH})"
+
+        # Replace the passwordHash field's value regardless of current contents.
+        sed -i -E "s|passwordHash: '[^']*'|passwordHash: '$PASSWORD_HASH'|" js/auth-config.js
+        echo "Password hash injected into js/auth-config.js"
 
     - name: Summary
       run: |
