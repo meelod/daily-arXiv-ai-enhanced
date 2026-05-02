@@ -17,7 +17,7 @@ import re
 import sys
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import dotenv
 import numpy as np
@@ -39,10 +39,15 @@ if os.path.exists(".env"):
 SYSTEM_PROMPT = open("trends_system.txt", "r").read()
 
 USER_TEMPLATE = """Corpus window: last {window_days} days, {paper_count} papers across {cluster_count} clusters.
+Previous report date: {prev_report_date}
 
-Below are the top {top_n} clusters ranked by (size × growth). Analyze each and return your TrendsReport.
+Below are the top {top_n} clusters ranked by (size × growth). Each cluster is tagged with its week-over-week status: NEW (no analogue last week), GROWING (size up >20%), STABLE (similar size), or SHRINKING (size down >20%). Use this status to prioritize your gap analysis — focus most attention on NEW and GROWING clusters; mention STABLE ones briefly only if your thesis has materially changed; deprioritize SHRINKING ones.
 
 {clusters}
+
+{dropped_section}
+
+In your `overview`, explicitly call out: (a) what's genuinely new this period, (b) which directions are accelerating, (c) any dropped clusters worth noting.
 """
 
 
@@ -201,13 +206,132 @@ def build_cluster_summary(
 def format_clusters_for_prompt(clusters: List[dict]) -> str:
     out = []
     for c in clusters:
+        status_info = c.get("status_info") or {}
+        status = (status_info.get("status") or "new").upper()
+        delta = status_info.get("delta_pct")
+        prev_label = status_info.get("matched_label")
+        if status == "NEW":
+            tag = "NEW (no analogue last week)"
+        elif delta is not None:
+            sign = "+" if delta >= 0 else ""
+            prev_part = f', was: "{prev_label}"' if prev_label else ""
+            tag = f"{status} ({sign}{delta}% papers since last week{prev_part})"
+        else:
+            tag = status
         out.append(
-            f"Cluster {c['id']}\n"
+            f"Cluster {c['id']} [{tag}]\n"
             f"  size: {c['size']} papers   growth_ratio: {c['growth_ratio']}   score: {c['score']}\n"
             f"  keywords: {', '.join(c['keywords'])}\n"
             f"  representative papers:\n" + "\n".join(c["sample_blocks"])
         )
     return "\n\n".join(out)
+
+
+def format_dropped_section(dropped: List[dict]) -> str:
+    if not dropped:
+        return ""
+    lines = ["Clusters present last week with no clear analogue this week (DROPPED):"]
+    for d in dropped[:8]:
+        label = d.get("label") or "(unlabeled)"
+        size = d.get("size", "?")
+        lines.append(f"  - \"{label}\" (was {size} papers)")
+    if len(dropped) > 8:
+        lines.append(f"  - ... and {len(dropped) - 8} more")
+    return "\n".join(lines)
+
+
+def load_previous_report(out_dir: str, end: datetime) -> Optional[dict]:
+    """Find and load the most recent trends report dated strictly before `end`."""
+    if not os.path.isdir(out_dir):
+        return None
+    candidates: List[Tuple[datetime, str]] = []
+    for path in glob.glob(os.path.join(out_dir, "*.json")):
+        m = re.search(r"(\d{4}-\d{2}-\d{2})\.json$", path)
+        if not m:
+            continue
+        try:
+            d = datetime.strptime(m.group(1), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if d < end:
+            candidates.append((d, path))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    try:
+        with open(candidates[0][1], "r") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"failed to load previous report: {e}", file=sys.stderr)
+        return None
+
+
+def match_clusters_to_previous(
+    current_clusters: List[dict],
+    current_centroids: Dict[int, np.ndarray],
+    previous_report: Optional[dict],
+    similarity_threshold: float = 0.85,
+) -> Tuple[Dict[int, dict], List[dict], Optional[str]]:
+    """Match current clusters to previous-report clusters by centroid similarity.
+
+    Returns (statuses keyed by current cluster id, dropped previous clusters, prev_report_date).
+    """
+    statuses: Dict[int, dict] = {
+        c["id"]: {"status": "new", "delta_pct": None, "matched_label": None}
+        for c in current_clusters
+    }
+    if not previous_report:
+        return statuses, [], None
+
+    prev_clusters = previous_report.get("clusters", [])
+    prev_with_centroids = [c for c in prev_clusters if c.get("centroid")]
+    if not prev_with_centroids or not current_clusters:
+        return statuses, [], previous_report.get("report_date")
+
+    cur_vecs = np.stack([current_centroids[c["id"]] for c in current_clusters])
+    prev_vecs = np.stack([np.asarray(c["centroid"], dtype=np.float32) for c in prev_with_centroids])
+    cur_norm = cur_vecs / (np.linalg.norm(cur_vecs, axis=1, keepdims=True) + 1e-9)
+    prev_norm = prev_vecs / (np.linalg.norm(prev_vecs, axis=1, keepdims=True) + 1e-9)
+    sim = cur_norm @ prev_norm.T
+
+    pairs = [(float(sim[i, j]), i, j) for i in range(sim.shape[0]) for j in range(sim.shape[1])]
+    pairs.sort(reverse=True)
+
+    matched_cur: Dict[int, Tuple[int, float]] = {}
+    matched_prev: set = set()
+    for s, i, j in pairs:
+        if s < similarity_threshold:
+            break
+        if i in matched_cur or j in matched_prev:
+            continue
+        matched_cur[i] = (j, s)
+        matched_prev.add(j)
+
+    for idx, c in enumerate(current_clusters):
+        cid = c["id"]
+        if idx not in matched_cur:
+            statuses[cid] = {"status": "new", "delta_pct": None, "matched_label": None}
+            continue
+        j, s = matched_cur[idx]
+        prev = prev_with_centroids[j]
+        prev_size = prev.get("size") or 1
+        ratio = c["size"] / prev_size
+        delta_pct = round((c["size"] - prev_size) / prev_size * 100, 1)
+        if ratio >= 1.2:
+            status = "growing"
+        elif ratio <= 0.8:
+            status = "shrinking"
+        else:
+            status = "stable"
+        statuses[cid] = {
+            "status": status,
+            "delta_pct": delta_pct,
+            "matched_label": prev.get("label"),
+            "match_similarity": round(s, 3),
+        }
+
+    dropped = [prev_with_centroids[j] for j in range(len(prev_with_centroids)) if j not in matched_prev]
+    return statuses, dropped, previous_report.get("report_date")
 
 
 def main():
@@ -268,6 +392,11 @@ def main():
     summaries.sort(key=lambda c: c["score"], reverse=True)
     top = summaries[: args.top_n]
 
+    previous_report = load_previous_report(args.out_dir, end)
+    statuses, dropped, prev_report_date = match_clusters_to_previous(top, centroids, previous_report)
+    for c in top:
+        c["status_info"] = statuses.get(c["id"], {"status": "new"})
+
     llm = ChatOpenAI(model=model_name).with_structured_output(TrendsReport, method="function_calling")
     prompt = ChatPromptTemplate.from_messages([
         SystemMessagePromptTemplate.from_template(SYSTEM_PROMPT),
@@ -275,7 +404,11 @@ def main():
     ])
     chain = prompt | llm
 
-    print(f"asking {model_name} to analyze top {len(top)} clusters", file=sys.stderr)
+    print(
+        f"asking {model_name} to analyze top {len(top)} clusters "
+        f"(previous report: {prev_report_date or 'none'}; dropped: {len(dropped)})",
+        file=sys.stderr,
+    )
     report: TrendsReport = chain.invoke({
         "language": language,
         "window_days": args.window_days,
@@ -283,6 +416,8 @@ def main():
         "cluster_count": len(summaries),
         "top_n": len(top),
         "clusters": format_clusters_for_prompt(top),
+        "dropped_section": format_dropped_section(dropped),
+        "prev_report_date": prev_report_date or "(no previous report — first run)",
     })
 
     cluster_lookup = {c["id"]: c for c in top}
@@ -291,6 +426,7 @@ def main():
         c = cluster_lookup.get(analysis.cluster_id)
         if not c:
             continue
+        status_info = c.get("status_info") or {}
         out_clusters.append({
             **analysis.model_dump(),
             "size": c["size"],
@@ -299,6 +435,10 @@ def main():
             "keywords": c["keywords"],
             "sample_paper_ids": c["sample_paper_ids"],
             "all_paper_ids": c["all_paper_ids"],
+            "status": status_info.get("status", "new"),
+            "delta_pct": status_info.get("delta_pct"),
+            "matched_prev_label": status_info.get("matched_label"),
+            "centroid": [round(float(x), 4) for x in centroids[c["id"]].tolist()],
         })
 
     paper_index = {
@@ -314,6 +454,7 @@ def main():
 
     output = {
         "report_date": end_str,
+        "previous_report_date": prev_report_date,
         "window_days": args.window_days,
         "paper_count": len(aligned_ids),
         "cluster_count": len(summaries),
@@ -321,6 +462,10 @@ def main():
         "model": model_name,
         "overview": report.overview,
         "clusters": out_clusters,
+        "dropped_clusters": [
+            {"label": d.get("label"), "size": d.get("size"), "one_line": d.get("one_line")}
+            for d in dropped
+        ],
         "paper_index": paper_index,
     }
 

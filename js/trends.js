@@ -71,6 +71,21 @@
         return 'confidence-low';
     }
 
+    const STATUS_ORDER = { new: 0, growing: 1, stable: 2, shrinking: 3 };
+
+    function statusBadge(status, deltaPct) {
+        const s = (status || 'new').toLowerCase();
+        const span = document.createElement('span');
+        span.className = 'status-tag status-' + s;
+        let text = s.toUpperCase();
+        if (deltaPct !== null && deltaPct !== undefined && s !== 'new') {
+            const sign = deltaPct >= 0 ? '+' : '';
+            text += ` ${sign}${deltaPct}%`;
+        }
+        span.textContent = text;
+        return span;
+    }
+
     function renderCluster(c, paperIndex, opts) {
         const card = document.createElement('div');
         card.className = 'cluster-card';
@@ -84,6 +99,10 @@
 
         const stats = document.createElement('div');
         stats.className = 'cluster-stats';
+
+        if (c.status) {
+            stats.appendChild(statusBadge(c.status, c.delta_pct));
+        }
 
         const sizePill = document.createElement('span');
         sizePill.className = 'stat-pill';
@@ -104,6 +123,15 @@
 
         head.appendChild(stats);
         card.appendChild(head);
+
+        if (c.matched_prev_label && c.matched_prev_label !== c.label) {
+            const prev = document.createElement('p');
+            prev.style.color = '#6b7280';
+            prev.style.fontSize = '12px';
+            prev.style.margin = '0 0 8px';
+            prev.textContent = `Last week: "${c.matched_prev_label}"`;
+            card.appendChild(prev);
+        }
 
         if (c.one_line) {
             const oneLine = document.createElement('p');
@@ -155,13 +183,46 @@
             showMessage(mount, 'No clusters in this report.');
             return;
         }
-        clusters.forEach((c) => mount.appendChild(renderCluster(c, paperIndex, { mode })));
+        const sorted = clusters.slice().sort((a, b) => {
+            const sa = STATUS_ORDER[(a.status || 'new').toLowerCase()] ?? 99;
+            const sb = STATUS_ORDER[(b.status || 'new').toLowerCase()] ?? 99;
+            if (sa !== sb) return sa - sb;
+            return (b.score || 0) - (a.score || 0);
+        });
+        sorted.forEach((c) => mount.appendChild(renderCluster(c, paperIndex, { mode })));
+    }
+
+    function renderDropped(dropped, mount) {
+        if (!dropped || dropped.length === 0) return;
+        const wrap = document.createElement('div');
+        wrap.className = 'dropped-section';
+        const h = document.createElement('h4');
+        h.className = 'dropped-heading';
+        h.textContent = `Dropped since last week (${dropped.length})`;
+        wrap.appendChild(h);
+        const list = document.createElement('ul');
+        list.className = 'dropped-list';
+        dropped.forEach((d) => {
+            const li = document.createElement('li');
+            const label = d.label || '(unlabeled)';
+            const size = d.size != null ? ` — was ${d.size} papers` : '';
+            li.textContent = `${label}${size}`;
+            list.appendChild(li);
+        });
+        wrap.appendChild(list);
+        mount.appendChild(wrap);
     }
 
     function renderHeader(report) {
         $('reportDate').textContent = report.report_date || '—';
         $('paperCount').textContent = (report.paper_count || 0) + ' papers';
         $('windowDays').textContent = (report.window_days || 90) + 'd window';
+        const prev = $('prevReport');
+        if (prev) {
+            prev.textContent = report.previous_report_date
+                ? `vs ${report.previous_report_date}`
+                : 'first report';
+        }
         $('overview').textContent = report.overview || '';
     }
 
@@ -186,6 +247,7 @@
             const report = await fetchJson(REPORT_PATH(name));
             renderHeader(report);
             renderClusters(report.clusters, report.paper_index, trendsMount, 'trends');
+            renderDropped(report.dropped_clusters, trendsMount);
             renderClusters(report.clusters, report.paper_index, gapsMount, 'gaps');
         } catch (e) {
             showMessage(trendsMount, 'Failed to load report: ' + e.message, 'error');
