@@ -212,7 +212,7 @@ def format_clusters_for_prompt(clusters: List[dict]) -> str:
 
 def main():
     args = parse_args()
-    model_name = os.environ.get("MODEL_NAME", "gpt-4o-mini")
+    model_name = os.environ.get("TRENDS_MODEL_NAME") or os.environ.get("MODEL_NAME", "gpt-4o-mini")
     language = os.environ.get("LANGUAGE", "English")
 
     end = (

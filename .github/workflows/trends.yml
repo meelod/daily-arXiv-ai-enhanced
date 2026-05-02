@@ -33,6 +33,7 @@ jobs:
           OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
           LANGUAGE: ${{ vars.LANGUAGE }}
           MODEL_NAME: ${{ vars.MODEL_NAME }}
+          TRENDS_MODEL_NAME: ${{ vars.TRENDS_MODEL_NAME }}
           REPORT_DATE_INPUT: ${{ github.event.inputs.report_date }}
         run: |
           source .venv/bin/activate
