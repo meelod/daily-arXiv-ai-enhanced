@@ -144,6 +144,19 @@ jobs:
           echo "no AI-enhanced file to embed; skipping"
         fi
 
+    - name: Prune embeddings older than 120 days
+      if: steps.dedup_check.outputs.has_new_content == 'true'
+      continue-on-error: true
+      run: |
+        if [ -d data/embeddings ]; then
+          before=$(du -sh data/embeddings 2>/dev/null | cut -f1)
+          deleted=$(find data/embeddings -name "*.jsonl" -mtime +120 -print -delete 2>/dev/null | wc -l)
+          after=$(du -sh data/embeddings 2>/dev/null | cut -f1)
+          echo "Pruned $deleted embedding file(s) older than 120 days. Size: $before -> $after"
+        else
+          echo "No embeddings directory yet — nothing to prune."
+        fi
+
     - name: Convert to Markdown
       if: steps.dedup_check.outputs.has_new_content == 'true'
       run: |
